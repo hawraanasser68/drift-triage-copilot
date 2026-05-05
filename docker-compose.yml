@@ -1,0 +1,183 @@
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB:       ${POSTGRES_DB:-mlops}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-mlops}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── MLflow tracking server ───────────────────────────────────────────────
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-mlops}
+      --default-artifact-root /mlflow/artifacts
+      --serve-artifacts
+      --host 0.0.0.0
+      --port 5000
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Trainer (runs once, registers the model, then exits) ────────────────
+
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python train.py
+    environment:
+      DATA_PATH:           /app/bank-additional-full.csv
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DATABASE_URL:        postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-mlops}
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: "no"  # run once only
+
+  # ── Model service ────────────────────────────────────────────────────────
+
+  model-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn model_service.app:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_NAME:          ${MODEL_NAME:-bank-marketing-classifier}
+      DATABASE_URL:        postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-mlops}
+      AGENT_WEBHOOK_URL:   http://agent:8001/drift-event
+      DRIFT_WINDOW:        ${DRIFT_WINDOW:-500}
+    depends_on:
+      trainer:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Triage agent ─────────────────────────────────────────────────────────
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn agent.app:app --host 0.0.0.0 --port 8001 --reload
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL:    postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-mlops}
+      REDIS_URL:       redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/docs"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Queue worker ─────────────────────────────────────────────────────────
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m worker.main
+    environment:
+      REDIS_URL:           redis://redis:6379
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_NAME:          ${MODEL_NAME:-bank-marketing-classifier}
+      DATABASE_URL:        postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-mlops}
+      WORKER_MAX_RETRIES:  ${WORKER_MAX_RETRIES:-3}
+      APP_DIR:             /app
+    depends_on:
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  # ── Streamlit dashboard ──────────────────────────────────────────────────
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_NAME:          ${MODEL_NAME:-bank-marketing-classifier}
+      AGENT_URL:           http://agent:8001
+      REDIS_URL:           redis://redis:6379
+    depends_on:
+      model-service:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+    restart: unless-stopped
+
+
+# ── Volumes ──────────────────────────────────────────────────────────────
+
+volumes:
+  postgres-data:
+  redis-data:
+  mlflow-artifacts:

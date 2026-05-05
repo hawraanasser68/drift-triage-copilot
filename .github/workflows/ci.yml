@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out the code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Set up Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 3. Install dependencies
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      # 4. Train the model — generates artifacts/ with pipeline.pkl,
+      #    model_card.json, X_test.parquet, y_test.parquet
+      #    Uses a local SQLite MLflow backend so no server is needed in CI.
+      - name: Train model
+        env:
+          MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+          DATA_PATH: bank-additional-full.csv
+        run: python train.py
+
+      # 5. Agent snapshot trajectory tests (mocked LLM — no API key needed)
+      - name: Agent trajectory tests
+        run: pytest tests/test_agent_trajectory.py -v
+
+      # 6. 1e-12 fidelity replay test against the trained model
+      - name: Replay fidelity test
+        run: pytest tests/test_replay.py -v
