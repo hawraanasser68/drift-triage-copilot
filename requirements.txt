@@ -29,3 +29,4 @@ langgraph-checkpoint-postgres==2.0.6
 
 # Dashboard
 streamlit==1.38.0
+plotly==5.24.1

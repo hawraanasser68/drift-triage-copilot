@@ -31,6 +31,8 @@ def _psi(reference: np.ndarray, current: np.ndarray, bins: int = 10) -> float:
     ref_counts, _ = np.histogram(reference, bins=breakpoints)
     cur_counts, _ = np.histogram(current, bins=breakpoints)
 
+
+    #converting to percentages
     # Replace zeros to avoid log(0)
     ref_pct = np.where(ref_counts == 0, 1e-4, ref_counts / len(reference))
     cur_pct = np.where(cur_counts == 0, 1e-4, cur_counts / len(current))

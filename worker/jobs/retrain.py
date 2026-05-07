@@ -8,6 +8,19 @@ import os
 import subprocess
 import sys
 
+import psycopg2
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/mlops")
+
+
+def _reset_drift_state():
+    """Reset drift state to none so the next drift episode can be detected."""
+    conn = psycopg2.connect(DATABASE_URL)
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE drift_state SET severity = 'none' WHERE id = 1")
+    conn.close()
+
 
 def run(payload: dict):
     """
@@ -33,3 +46,6 @@ def run(payload: dict):
 
     print("Retrain complete.")
     print(result.stdout)
+
+    _reset_drift_state()
+    print("Drift state reset to 'none' — system ready to detect the next drift episode.")

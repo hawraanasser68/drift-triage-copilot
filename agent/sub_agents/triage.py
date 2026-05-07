@@ -22,6 +22,21 @@ def run(drift_event: dict, llm_client: anthropic.Anthropic | None = None) -> dic
     Returns:
         dict with keys: recommended_action, reason, touches_production
     """
+    # Demo mode — return rule-based decision without calling the LLM
+    if os.getenv("DEMO_MODE", "false").lower() == "true" and llm_client is None:
+        severity = drift_event.get("severity", "none")
+        action_map = {
+            "none":     ("monitor",     False),
+            "warning":  ("replay_test", False),
+            "critical": ("retrain",     True),
+        }
+        action, touches = action_map.get(severity, ("monitor", False))
+        return {
+            "recommended_action": action,
+            "reason": f"Demo mode: severity={severity} → {action}.",
+            "touches_production": touches,
+        }
+
     if llm_client is None:
         llm_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 

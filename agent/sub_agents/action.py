@@ -39,10 +39,25 @@ def run(
     Returns:
         dict with keys: job_id, job_type, idempotency_key, queued
     """
-    if llm_client is None:
-        llm_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     if redis_client is None:
         redis_client = _get_redis()
+
+    # Demo mode — build job spec without calling the LLM
+    if os.getenv("DEMO_MODE", "false").lower() == "true" and llm_client is None:
+        job_spec = {
+            "job_type":        recommended_action,
+            "idempotency_key": f"{investigation_id}-{recommended_action}",
+            "payload": {"investigation_id": investigation_id, "triggered_by": "drift_triage_agent"},
+            "job_id":          str(uuid.uuid4()),
+        }
+        already_queued = redis_client.sismember("queue:processed_keys", job_spec["idempotency_key"])
+        if already_queued:
+            return {**job_spec, "queued": False, "reason": "duplicate — idempotency key already seen"}
+        redis_client.rpush(QUEUE_KEY, json.dumps(job_spec))
+        return {**job_spec, "queued": True}
+
+    if llm_client is None:
+        llm_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     system_prompt = PROMPT_PATH.read_text()
 

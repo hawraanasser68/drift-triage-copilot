@@ -7,7 +7,7 @@ FastAPI app for the triage agent.
 
 import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, ExitStack
 
 import psycopg2
 import psycopg2.extras
@@ -56,13 +56,15 @@ async def lifespan(app: FastAPI):
             """)
     conn.close()
 
-    # Compile the LangGraph graph with a Postgres checkpointer
-    checkpointer = PostgresSaver.from_conn_string(DATABASE_URL)
+    # Keep the PostgresSaver context manager open for the app lifetime
+    stack = ExitStack()
+    checkpointer = stack.enter_context(PostgresSaver.from_conn_string(DATABASE_URL))
     checkpointer.setup()  # creates LangGraph's internal checkpoint tables
     state["graph"] = create_graph(checkpointer)
 
     yield
 
+    stack.close()
     state.clear()
 
 
@@ -143,7 +145,10 @@ def approve(investigation_id: str, body: ApproveRequest):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    # Remove from pending approvals now that a decision was made
+    # Remove from pending approvals now that a decision was made.
+    # On rejection: also reset drift state to 'none' so the next drift-report
+    # call will re-trigger the alert — the system keeps prompting until the
+    # user approves a fix or drift genuinely resolves on its own.
     conn = psycopg2.connect(DATABASE_URL)
     with conn:
         with conn.cursor() as cur:
@@ -151,6 +156,8 @@ def approve(investigation_id: str, body: ApproveRequest):
                 "DELETE FROM pending_approvals WHERE investigation_id = %s",
                 (investigation_id,),
             )
+            if not body.approved:
+                cur.execute("UPDATE drift_state SET severity = 'none' WHERE id = 1")
     conn.close()
 
     return {

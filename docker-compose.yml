@@ -37,22 +37,23 @@ services:
     command: >
       mlflow server
       --backend-store-uri postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-mlops}
-      --default-artifact-root /mlflow/artifacts
+      --artifacts-destination /mlflow/artifacts
       --serve-artifacts
       --host 0.0.0.0
       --port 5000
     ports:
-      - "5000:5000"
+      - "5001:5000"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - mlflow-artifacts:/mlflow/artifacts
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
     restart: unless-stopped
 
   # ── Trainer (runs once, registers the model, then exits) ────────────────
@@ -95,11 +96,14 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
     restart: unless-stopped
 
   # ── Triage agent ─────────────────────────────────────────────────────────
@@ -112,20 +116,24 @@ services:
     ports:
       - "8001:8001"
     environment:
-      DATABASE_URL:    postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-mlops}
-      REDIS_URL:       redis://redis:6379
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
+      DATABASE_URL:      postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-mlops}
+      REDIS_URL:         redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL:   ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
+      DEMO_MODE:         ${DEMO_MODE:-false}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - .:/app
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/docs"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/docs')"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
     restart: unless-stopped
 
   # ── Queue worker ─────────────────────────────────────────────────────────
@@ -151,6 +159,7 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
+      - mlflow-artifacts:/mlflow/artifacts
     restart: unless-stopped
 
   # ── Streamlit dashboard ──────────────────────────────────────────────────
@@ -167,6 +176,9 @@ services:
       MODEL_NAME:          ${MODEL_NAME:-bank-marketing-classifier}
       AGENT_URL:           http://agent:8001
       REDIS_URL:           redis://redis:6379
+      MODEL_SERVICE_URL:   http://model-service:8000
+    volumes:
+      - .:/app
     depends_on:
       model-service:
         condition: service_healthy

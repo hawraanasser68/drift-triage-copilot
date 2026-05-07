@@ -222,7 +222,7 @@ def train():
     # ------------------------------------------------------------------
     mlflow.set_experiment("bank-marketing")
 
-    with mlflow.start_run() as run:
+    with mlflow.start_run(run_name=MODEL_NAME) as run:
         mlflow.log_params({
             "n_estimators": 200,
             "learning_rate": 0.1,
@@ -230,19 +230,69 @@ def train():
             "operating_threshold": operating_threshold,
         })
         mlflow.log_metrics(metrics)
+        mlflow.set_tags({
+            "model_type":   "GradientBoostingClassifier",
+            "dataset":      "UCI Bank Marketing",
+            "dataset_hash": model_card["dataset_hash"],
+        })
 
-        # Log the four artifacts
-        mlflow.log_artifact(str(pipeline_path), artifact_path="model")
-        mlflow.log_artifact(str(schema_path), artifact_path="model")
+        # Log model with the native sklearn flavour so MLflow links the run to
+        # the registered model name in the Experiments view (fixes the "—" dash).
+        signature = mlflow.models.infer_signature(
+            X_train.head(5),
+            model.predict_proba(X_train.head(5))[:, 1],
+        )
+        mlflow.sklearn.log_model(
+            sk_model=model,
+            artifact_path="sklearn_model",
+            signature=signature,
+            input_example=X_train.head(3),
+        )
+
+        # Keep supplementary artifacts at model/ for model-service / replay compat
+        mlflow.log_artifact(str(pipeline_path),   artifact_path="model")
+        mlflow.log_artifact(str(schema_path),     artifact_path="model")
         mlflow.log_artifact(str(model_card_path), artifact_path="model")
-        mlflow.log_artifact(str(ref_stats_path), artifact_path="model")
+        mlflow.log_artifact(str(ref_stats_path),  artifact_path="model")
+        mlflow.log_artifact(str(ARTIFACTS_DIR / "X_test.parquet"), artifact_path="model")
+        mlflow.log_artifact(str(ARTIFACTS_DIR / "y_test.parquet"), artifact_path="model")
 
-        # Register the model in the MLflow Model Registry
-        model_uri = f"runs:/{run.info.run_id}/model/pipeline.pkl"
-        mv = mlflow.register_model(model_uri, MODEL_NAME)
+        # Register via the sklearn model URI (not the raw pickle path)
+        mv = mlflow.register_model(
+            model_uri=f"runs:/{run.info.run_id}/sklearn_model",
+            name=MODEL_NAME,
+        )
 
-        print(f"\nRegistered: {MODEL_NAME} v{mv.version}  (run_id={run.info.run_id})")
-        print(f"Test AUC: {metrics['test_auc']:.4f} | Recall: {metrics['test_recall']:.4f}")
+    # Annotate the registry entry with description and per-metric tags so the
+    # model card is visible directly in the MLflow Model Registry UI.
+    client = MlflowClient()
+    client.update_registered_model(
+        name=MODEL_NAME,
+        description=(
+            "GradientBoostingClassifier trained on UCI Bank Marketing dataset. "
+            "Binary classification: predicts term deposit subscription. "
+            "Threshold tuned for recall ≥ 0.75 on validation set."
+        ),
+    )
+    client.update_model_version(
+        name=MODEL_NAME,
+        version=mv.version,
+        description=json.dumps(model_card, indent=2),
+    )
+    for tag_key, tag_val in {
+        "test_auc":            f"{metrics['test_auc']:.6f}",
+        "test_recall":         f"{metrics['test_recall']:.6f}",
+        "test_precision":      f"{metrics['test_precision']:.6f}",
+        "test_f1":             f"{metrics['test_f1']:.6f}",
+        "operating_threshold": str(operating_threshold),
+        "dataset_hash":        model_card["dataset_hash"],
+        "sklearn_version":     model_card["sklearn_version"],
+        "python_version":      model_card["python_version"],
+    }.items():
+        client.set_model_version_tag(MODEL_NAME, mv.version, tag_key, tag_val)
+
+    print(f"\nRegistered: {MODEL_NAME} v{mv.version}  (run_id={run.info.run_id})")
+    print(f"Test AUC: {metrics['test_auc']:.4f} | Recall: {metrics['test_recall']:.4f}")
 
 
 if __name__ == "__main__":

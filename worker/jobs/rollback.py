@@ -6,7 +6,19 @@ and promote it to Production, archiving the current Production version.
 import os
 
 import mlflow
+import psycopg2
 from mlflow import MlflowClient
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/mlops")
+
+
+def _reset_drift_state():
+    """Reset drift state to none so the next drift episode can be detected."""
+    conn = psycopg2.connect(DATABASE_URL)
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE drift_state SET severity = 'none' WHERE id = 1")
+    conn.close()
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 MODEL_NAME          = os.getenv("MODEL_NAME", "bank-marketing-classifier")
@@ -58,3 +70,6 @@ def run(payload: dict):
     )
 
     print(f"Rollback complete. v{previous.version} is now Production.")
+
+    _reset_drift_state()
+    print("Drift state reset to 'none' — system ready to detect the next drift episode.")

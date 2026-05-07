@@ -15,7 +15,7 @@ from typing_extensions import TypedDict
 import anthropic
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.postgres import PostgresSaver
-from langgraph.types import interrupt
+from langgraph.errors import NodeInterrupt
 
 from agent.sub_agents import triage as triage_agent
 from agent.sub_agents import action as action_agent
@@ -44,19 +44,19 @@ class InvestigationState(TypedDict):
 # Decides which sub-agent to call next based on current state.
 # ---------------------------------------------------------------------------
 def supervisor_node(state: InvestigationState) -> InvestigationState:
-    if state["triage_result"] is None:
+    if state.get("triage_result") is None:
         return {**state, "next": "triage"}
 
-    if state["recommended_action"] == "monitor":
+    if state.get("recommended_action") == "monitor":
         # No action needed — skip straight to comms
-        if state["comms_result"] is None:
+        if state.get("comms_result") is None:
             return {**state, "next": "comms"}
         return {**state, "next": "end"}
 
-    if state["action_result"] is None:
+    if state.get("action_result") is None:
         return {**state, "next": "action"}
 
-    if state["comms_result"] is None:
+    if state.get("comms_result") is None:
         return {**state, "next": "comms"}
 
     return {**state, "next": "end"}
@@ -93,14 +93,16 @@ def action_node(
 ) -> InvestigationState:
     # If this action touches Production and we haven't asked the human yet → pause
     if state["touches_production"] and state["human_approved"] is None:
-        approval_response = interrupt({
+        drift = state["drift_event"]
+        raise NodeInterrupt({
             "investigation_id":   state["investigation_id"],
             "recommended_action": state["recommended_action"],
             "reason":             state["triage_result"]["reason"],
             "message":            "Human approval required before dispatching to Production.",
+            "severity":           drift.get("severity", "unknown"),
+            "output_drift":       drift.get("output_drift"),
+            "window_size":        drift.get("window_size"),
         })
-        human_approved = approval_response.get("approved", False)
-        state = {**state, "human_approved": human_approved}
 
     # Human rejected → skip dispatching, head to comms
     if state["human_approved"] is False:
@@ -164,10 +166,7 @@ def create_graph(checkpointer):
     builder.add_edge("action",  "supervisor")
     builder.add_edge("comms",   "supervisor")
 
-    return builder.compile(
-        checkpointer=checkpointer,
-        interrupt_before=["action"],  # always checkpoint before action so HIL can pause
-    )
+    return builder.compile(checkpointer=checkpointer)
 
 
 # ---------------------------------------------------------------------------
@@ -195,14 +194,15 @@ def start_investigation(drift_event: dict, graph) -> tuple[str, bool, dict | Non
     for _ in graph.stream(initial_state, config=config):
         pass
 
-    # Check if the graph paused at the HIL interrupt
-    snapshot      = graph.get_state(config)
-    is_paused     = bool(snapshot.tasks)
+    # Check if graph paused at a NodeInterrupt
+    snapshot       = graph.get_state(config)
+    is_paused      = bool(snapshot.next)
     interrupt_data = None
     if is_paused and snapshot.tasks:
-        task = snapshot.tasks[0]
-        if task.interrupts:
-            interrupt_data = task.interrupts[0].value
+        for task in snapshot.tasks:
+            if hasattr(task, "interrupts") and task.interrupts:
+                interrupt_data = task.interrupts[0].value
+                break
 
     return investigation_id, is_paused, interrupt_data
 
@@ -210,8 +210,8 @@ def start_investigation(drift_event: dict, graph) -> tuple[str, bool, dict | Non
 def resume_investigation(investigation_id: str, approved: bool, graph) -> None:
     """Resume a paused investigation after human approval / rejection."""
     config = {"configurable": {"thread_id": investigation_id}}
-    graph.invoke(
-        {"approved": approved},
-        config=config,
-        command={"resume": {"approved": approved}},
-    )
+    # Update human_approved in the checkpoint, then let LangGraph re-run the
+    # interrupted action node with the full restored state.
+    graph.update_state(config, {"human_approved": approved})
+    for _ in graph.stream(None, config=config):
+        pass

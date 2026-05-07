@@ -41,6 +41,35 @@ def run(
     Returns:
         dict with keys: summary, status
     """
+    # Demo mode — write summary without calling the LLM
+    if os.getenv("DEMO_MODE", "false").lower() == "true" and llm_client is None:
+        if human_approved is False:
+            outcome, status = "rejected by human", "rejected"
+        elif job_id:
+            outcome, status = f"job {job_id} dispatched", "resolved"
+        else:
+            outcome, status = "monitored, no action needed", "resolved"
+        result = {
+            "summary": f"Investigation {investigation_id}: severity={severity}, action={recommended_action}, outcome={outcome}.",
+            "status": status,
+        }
+        close_conn = db_conn is None
+        if db_conn is None:
+            db_conn = _get_db()
+        with db_conn:
+            with db_conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO investigations (investigation_id, severity, recommended_action,
+                                               human_approved, job_id, summary, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (investigation_id) DO UPDATE
+                        SET summary = EXCLUDED.summary, status = EXCLUDED.status
+                """, (investigation_id, severity, recommended_action,
+                      human_approved, job_id, result["summary"], result["status"]))
+        if close_conn:
+            db_conn.close()
+        return result
+
     if llm_client is None:
         llm_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
