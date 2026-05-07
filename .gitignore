@@ -14,7 +14,7 @@ mlflow.db
 mlruns/
 
 # Data (too large for git)
-*.csv
+# bank-additional-full.csv is committed — needed for CI training step
 
 # Jupyter checkpoints
 .ipynb_checkpoints/

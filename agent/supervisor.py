@@ -14,8 +14,12 @@ from typing_extensions import TypedDict
 
 import anthropic
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.errors import NodeInterrupt
+
+try:
+    from langgraph.checkpoint.postgres import PostgresSaver
+except ImportError:
+    PostgresSaver = None
 
 from agent.sub_agents import triage as triage_agent
 from agent.sub_agents import action as action_agent
